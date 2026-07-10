@@ -7,7 +7,7 @@ use Data::DDSketch::Shared;
 {
     my $dd = Data::DDSketch::Shared->new(undef, 0.01, 1024);
     isa_ok $dd, 'Data::DDSketch::Shared';
-    is $dd->alpha, 0.01, 'alpha';
+    cmp_ok abs($dd->alpha - 0.01), '<', 1e-9, 'alpha';
     is $dd->num_buckets, 1024, 'num_buckets';
     cmp_ok abs($dd->gamma - (1.01/0.99)), '<', 1e-12, 'gamma == (1+a)/(1-a)';
     is $dd->count, 0, 'empty: count 0';
@@ -127,7 +127,7 @@ use Data::DDSketch::Shared;
     $dd->add($_) for 1 .. 20;
     my $st = $dd->stats;
     is ref($st), 'HASH', 'stats hashref';
-    is $st->{alpha}, 0.01, 'stats alpha';
+    cmp_ok abs($st->{alpha} - 0.01), '<', 1e-9, 'stats alpha';
     is $st->{num_buckets}, 512, 'stats num_buckets';
     is $st->{count}, 20, 'stats count';
     is $st->{min}, 1, 'stats min';
