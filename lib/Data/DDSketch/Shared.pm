@@ -49,7 +49,8 @@ C<ceil(log_gamma(|v|))>, with C<gamma = (1 + alpha) / (1 - alpha)>; every value
 in a bucket is within C<alpha> of the bucket's representative value. Positive and
 negative magnitudes use separate bucket stores and exact zeros a dedicated
 counter, so the full real line is covered. The sketch also tracks the exact
-count, sum, minimum, and maximum, giving mean and true extremes for free.
+count, minimum, and maximum, plus a running sum, giving mean and true extremes
+for free.
 
 Because the buckets live in a shared mapping, B<several processes feed one
 sketch>: any process that opens the same backing file, inherits the anonymous
@@ -98,15 +99,16 @@ write lock, validating them all first. Negative values and zero are supported.
     my $v   = $dd->quantile($q);     # value at quantile $q in 0 .. 1 (undef if empty)
     my $med = $dd->median;           # quantile(0.5)
     $dd->min; $dd->max;              # exact smallest / largest value (undef if empty)
-    $dd->mean;                       # exact mean (undef if empty)
-    $dd->sum; $dd->count;            # exact sum and number of values
+    $dd->mean;                       # running mean (undef if empty)
+    $dd->sum; $dd->count;            # running sum and exact number of values
     $dd->zero_count;                 # how many exact-zero values were added
 
 C<quantile> returns the estimated value at quantile C<$q> (e.g. C<0.99> for the
 99th percentile), guaranteed within relative error C<alpha> of the true value; it
 returns C<undef> for an empty sketch and croaks if C<$q> is outside C<[0, 1]>.
-C<min>, C<max>, C<mean>, C<sum>, and C<count> are B<exact> (tracked separately
-from the buckets).
+C<min>, C<max>, and C<count> are B<exact> (tracked separately from the
+buckets); C<sum> and C<mean> are double-precision running values subject to
+floating-point rounding.
 
 =head2 Merging and introspection
 
@@ -132,8 +134,9 @@ For any quantile, the returned value C<e> and the true value C<v> satisfy
 C<|e - v| <= alpha * |v|> -- a relative guarantee that holds across the whole
 range, so the 99.9th percentile of a heavy tail is as accurate (in relative
 terms) as the median. This is the property a fixed-bucket histogram lacks. The
-count, sum, minimum, maximum, and mean are exact. The only approximation is the
-per-quantile value, and only for magnitudes inside the representable window;
+count, minimum, and maximum are exact; the sum and mean are double-precision
+running values subject to floating-point rounding. The only approximation is
+the per-quantile value, and only for magnitudes inside the representable window;
 magnitudes outside it collapse into the extreme bucket and lose accuracy.
 
 =head1 SHARING ACROSS PROCESSES
@@ -155,9 +158,25 @@ the mapping.
 =head1 CRASH SAFETY
 
 Mutation is guarded by a futex-based write-preferring rwlock with PID-encoded
-ownership and dead-owner recovery. Each C<add> is a short bounded update, so a
-crash leaves the sketch consistent up to the last completed operation.
+ownership and dead-owner recovery. Each C<add> is a short bounded update, but
+recovery restores locking only -- it performs no state repair. C<add> commits
+the scalar aggregates (count, sum, min, max) before the bucket counter, so a
+crash in that window leaves C<count> ahead of the buckets and
+C<quantile(1.0)> can return C<undef> on a non-empty sketch until the next
+C<add> completes.
 B<Limitation>: PID reuse is not detected (very unlikely in practice).
+
+Reader-slot exhaustion (slotless readers): dead-process recovery attributes a
+crashed lock holder's contribution through its reader-slot. The slot table holds
+1024 entries (one per concurrent reader process). If more than that many reader
+processes share one mapping at once, a reader that cannot claim a slot proceeds
+"slotless" -- it still takes the read lock but leaves no per-process record. If
+such a slotless reader is then killed while holding the read lock, its share of
+the lock cannot be attributed to a dead process, so writer recovery cannot
+reclaim it and writers may block until the mapping is recreated. Reaching this
+needs more than 1024 concurrent reader processes on one mapping plus a crash in
+the brief read-lock window; the dead-process slot reclaim keeps the table from
+filling with stale entries, so in practice it is very unlikely.
 
 =head1 SEE ALSO
 

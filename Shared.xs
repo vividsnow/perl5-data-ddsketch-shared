@@ -10,7 +10,8 @@
     if (!sv_isobject(sv) || !sv_derived_from(sv, "Data::DDSketch::Shared")) \
         croak("Expected a Data::DDSketch::Shared object"); \
     DdHandle *h = INT2PTR(DdHandle*, SvIV(SvRV(sv))); \
-    if (!h) croak("Attempted to use a destroyed Data::DDSketch::Shared object")
+    if (!h) croak("Attempted to use a destroyed Data::DDSketch::Shared object"); \
+    sv_2mortal(SvREFCNT_inc(SvRV(sv)))   /* pin the referent so a reentrant DESTROY (from overload/tie on an arg) can't free the handle mid-method */
 
 #define MAKE_OBJ(class, handle) \
     SV *obj = newSViv(PTR2IV(handle)); \
@@ -106,6 +107,7 @@ add_many(self, values)
     IV  top;
     UV  added = 0;
   CODE:
+    SvGETMAGIC(values);
     if (!SvROK(values) || SvTYPE(SvRV(values)) != SVt_PVAV)
         croak("Data::DDSketch::Shared->add_many: expected an array reference");
     av = (AV *)SvRV(values);
