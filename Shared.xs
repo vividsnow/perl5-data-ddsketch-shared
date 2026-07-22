@@ -13,6 +13,20 @@
     if (!h) croak("Attempted to use a destroyed Data::DDSketch::Shared object"); \
     sv_2mortal(SvREFCNT_inc(SvRV(sv)))   /* pin the referent so a reentrant DESTROY (from overload/tie on an arg) can't free the handle mid-method */
 
+/* The pin above only blocks REFCOUNT-driven destruction. Perl run from argument
+ * magic can still call $obj->DESTROY explicitly, which frees the handle and
+ * zeroes the IV, leaving the local `h` dangling. Re-read it wherever such magic
+ * can intervene before `h` is used. Sources of that magic here: SvGETMAGIC on an
+ * argument, av_len on a TIED array (AvFILL -> mg_size -> FETCHSIZE), element
+ * fetches, and sv_isobject/sv_derived_from (both begin with SvGETMAGIC).
+ * The same Perl can also REPLACE the invocant ($obj = 42 mutates ST(0), because
+ * Perl passes aliases), hence the SvROK re-check before SvRV. */
+#define REEXTRACT(sv) \
+    if (!SvROK(sv)) \
+        croak("Data::DDSketch::Shared object was replaced during the call"); \
+    h = INT2PTR(DdHandle*, SvIV(SvRV(sv))); \
+    if (!h) croak("Data::DDSketch::Shared object destroyed during the call")
+
 #define MAKE_OBJ(class, handle) \
     SV *obj = newSViv(PTR2IV(handle)); \
     SV *ref = newRV_noinc(obj); \
@@ -32,10 +46,12 @@ new(class, path = &PL_sv_undef, alpha = 0.01, num_buckets = 2048, ...)
   PREINIT:
     char errbuf[DD_ERR_BUFLEN];
   CODE:
-    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     /* Optional 5th arg: file mode for a newly-created file-backed segment
-     * (default 0600, owner-only). Pass e.g. 0660 for cross-user sharing. */
+     * (default 0600, owner-only). Pass e.g. 0660 for cross-user sharing.
+     * Resolve it FIRST: its get-magic runs arbitrary Perl that can realloc or
+     * free the path PV, so capture the path LAST, immediately before use. */
     mode_t mode = (items > 4 && (SvGETMAGIC(ST(4)), SvOK(ST(4)))) ? (mode_t)SvUV(ST(4)) : 0600;
+    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     DdHandle *h = dd_create(p, alpha, (uint64_t)num_buckets, mode, errbuf);
     if (!h) croak("Data::DDSketch::Shared->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -125,6 +141,11 @@ add_many(self, values)
                 vs[i] = v;
             }
         }
+        /* SvGETMAGIC(values), av_len (tied FETCHSIZE) and the element SvNV
+         * above all run Perl that can have destroyed self. This must sit
+         * OUTSIDE the `if (cnt)` block: an empty (or tied, size-0) array
+         * skips the loop but still reaches the lock below. */
+        REEXTRACT(self);
         dd_rwlock_wrlock(h);                             /* locked region: NO croak-capable calls */
         for (i = 0; i < cnt; i++) { dd_insert_locked(h, vs[i], 1); added++; }
         __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);
@@ -256,6 +277,10 @@ merge(self, other)
         croak("Data::DDSketch::Shared->merge: expected a Data::DDSketch::Shared object");
     DdHandle *o = INT2PTR(DdHandle*, SvIV(SvRV(other)));
     if (!o) croak("Attempted to use a destroyed Data::DDSketch::Shared object");
+    /* sv_isobject/sv_derived_from above begin with SvGETMAGIC(other), so a tied
+     * `other` can have run Perl that destroyed self before h is used below.
+     * `o` was read after that magic and needs no re-read. */
+    REEXTRACT(self);
 
     /* geometry is immutable after creation -- compare the attach-time-cached
      * copies (the same values the merge math uses), not the peer-writable header,
