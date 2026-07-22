@@ -11,6 +11,7 @@ Shared.xs
 t/01-basic.t
 xt/asan.t
 xt/crash_recovery.t
+xt/destroy_during_call.t
 xt/eg_runs.t
 xt/fork_dd.t
 xt/kwalitee.t
